@@ -1,0 +1,109 @@
+#set up constants
+$dirDepth = 4
+$containerName = "public"
+$baseStorageUri = 'https://%storageAccountName%.blob.core.windows.net/'+$containerName
+$ttl = 3600
+$defaultDoc = "index.html"
+$staticFilePath = D:\home\site\repository\staticFiles
+
+# automatically generate the proxies.json file
+$rootFileList = Get-ChildItem -File $staticFilePath
+$extList = Get-ChildItem -File -Recurse $staticFilePath | Select-Object Extension | Sort-Object Extension | Get-Unique -asString
+
+$objProxiesJson = @{}
+$proxiesList = @{}
+
+# default root document
+$proxiesList."defaultRoot" = @{
+  matchCondition = @{
+      route = "/"
+      }
+  backendUri = "$baseStorageUri/$defaultDoc"
+}
+
+# iterate thru the root filenames
+foreach ($file in $rootFileList.Name.Where{$_ -ne '.keep'}) {
+  $proxiesList."root$file" = @{
+      matchCondition = @{
+          route = "/$file"
+          }
+      backendUri = "$baseStorageUri/$file"
+  }
+
+}
+
+# iterate thru directory depth and add file types
+For ($i=1; $i -le $dirDepth; $i++)
+{
+  $path = ""
+  For ($d=1; $d -le $i; $d++){
+    $path += "/{level$d}"
+  }
+  $path += "/"
+
+  # default document for each level
+  $proxiesList."defaultLevel$i" = @{
+    matchCondition = @{
+        route = "$path"
+        }
+    backendUri = "$baseStorageUri$path$defaultDoc"
+  }
+
+  # and the rest of the document types
+  foreach ($ext in $extList.Extension.Where{$_ -ne '.keep'}) {
+    $proxiesList."level$i$ext" = @{
+        matchCondition = @{
+            route = "$path{name}$ext"
+            }
+        backendUri = "$baseStorageUri$path{name}$ext"
+    }
+  }
+}
+
+$objProxiesJson = @{
+    '$schema' = "http://json.schemastore.org/proxies"
+    proxies = $proxiesList
+}
+
+convertto-json -InputObject $objProxiesJson -Depth 5| Out-File d:\home\site\wwwroot\proxies.json
+
+#copy the host.json, proxies.json and keepalive function into the right locations
+Copy-Item functionSrc\* -Force -Destination d:\home\site\wwwroot -Recurse
+
+# Connection string associated with the blob storage.
+$blobStorage = $env:AzureWebJobsStorage
+
+# Then we extract the name and key below
+$accountKey = ""
+$accountName = ""
+$array = $blobStorage.Split(';')
+foreach($element in $array)
+{
+  if($element.Contains('AccountName')) {
+    $accountName = $element.Replace("AccountName=", "")
+  }  
+  if($element.Contains('AccountKey')) {
+      $accountKey = $element.Replace("AccountKey=", "")
+  }
+}
+
+# Use AzCopy to deploy blob storage as long as we have an Account Key for the storage account
+if($accountKey -ne "")
+{
+  .\tools\AzCopy\AzCopy.exe /Source:$staticFilePath /Dest:https://$accountName.blob.core.windows.net/public /DestKey:$accountKey /SetContentType /S /Y
+  $ProgressPreference="SilentlyContinue"
+  $StorageContext = New-AzureStorageContext  -StorageAccountName $accountName -StorageAccountKey $accountKey
+  Set-AzureStorageContainerAcl -Context $StorageContext -Container "public" -Permission Blob
+
+  #set TTL
+  $blobs = Get-AzureStorageBlob -Container "public" -Context $StorageContext
+  foreach ($blob in $blobs)
+  {
+    $blob.ICloudBlob.Properties.CacheControl = "max-age=$ttl"
+    $blob.ICloudBlob.SetProperties()
+  }
+}
+else
+{
+  Write-Host "Unable to find Storage Account Key"
+}

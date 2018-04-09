@@ -1,0 +1,11 @@
+{
+    "bindings": [
+      {
+        "type": "timerTrigger",
+        "name": "keepaliveTimer",
+        "direction": "in",
+        "schedule": "0 */10 * * * *",
+        "runOnStartup": true
+      }
+    ]
+  }
